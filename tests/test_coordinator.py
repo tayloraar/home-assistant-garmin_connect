@@ -19,6 +19,7 @@ from custom_components.garmin_connect.coordinator import (
     CoreCoordinator,
     GearCoordinator,
     NutritionCoordinator,
+    build_timeline,
 )
 
 from .conftest import ENTRY_DATA
@@ -443,3 +444,52 @@ async def test_get_day_returns_summary_and_raw() -> None:
     assert out["summary"]["date"] == "2026-10-17"
     assert out["summary"]["totalSteps"] == 6909
     assert out["raw"]["maxStressLevel"] == 97
+
+
+def test_build_timeline_hourly_and_markers() -> None:
+    # 2026-10-17 22:00 and 22:03 UTC = 2026-10-18 09:00/09:03 in Melbourne (UTC+11)
+    t0 = 1_792_274_400_000
+    stress = {
+        "stressValuesArray": [[t0, 40], [t0 + 180_000, 60], [t0 + 360_000, -2], [t0 + 540_000, -1]],
+        "bodyBatteryValuesArray": [[t0, "MEASURED", 70, 2.0], [t0 + 180_000, "MEASURED", 68, 2.0]],
+    }
+    heart_rate = {"heartRateValues": [[t0, 80], [t0 + 120_000, 90], [t0 + 240_000, None], [t0, 0]]}
+    with patch(
+        "custom_components.garmin_connect.coordinator.dt_util.as_local",
+        side_effect=lambda value: value,
+    ):
+        out = build_timeline(stress, heart_rate)
+
+    hour = out["hourly"][0]
+    assert hour["avg_stress"] == 50
+    assert hour["max_stress"] == 60
+    assert hour["activity_samples"] == 1
+    assert hour["avg_heart_rate"] == 85
+    assert hour["min_heart_rate"] == 80
+    assert hour["body_battery_end"] == 68
+    assert len(out["stress"]) == 4
+    assert len(out["heart_rate"]) == 2
+    assert out["body_battery"][0]["level"] == 70
+
+
+def test_build_timeline_tolerates_empty_and_bad_rows() -> None:
+    out = build_timeline(None, {"heartRateValues": [None, [1], ["x", 5], [True, 5]]})
+    assert out == {"hourly": [], "stress": [], "body_battery": [], "heart_rate": []}
+
+
+async def test_get_day_timeline_requests_both_endpoints() -> None:
+    client = _yesterday_client(date(2026, 10, 18))
+    client._request = AsyncMock(
+        side_effect=[{"stressValuesArray": [[1_792_274_400_000, 30]]}, {"heartRateValues": []}]
+    )
+    profile = MagicMock()
+    profile.display_name = "a b/c"
+    client.get_user_profile = AsyncMock(return_value=profile)
+    coordinator = _make_base(client)
+
+    out = await coordinator.async_get_day_timeline(date(2026, 10, 18))
+    stress_call, hr_call = client._request.call_args_list
+    assert stress_call.args[1].endswith("/wellness-service/wellness/dailyStress/2026-10-18")
+    assert hr_call.args[1].endswith("/wellness-service/wellness/dailyHeartRate/a%20b%2Fc")
+    assert hr_call.kwargs["params"] == {"date": "2026-10-18"}
+    assert out["stress"][0]["value"] == 30

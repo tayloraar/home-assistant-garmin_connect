@@ -8,11 +8,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
+from urllib.parse import quote
 
 from aiohttp import ClientError
 from ha_garmin import GarminAuth, GarminClient
+from ha_garmin.const import GARMIN_CONNECT_API
 from ha_garmin.exceptions import GarminAuthError, GarminConnectError
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -269,6 +271,114 @@ class CoreCoordinator(BaseGarminCoordinator):
         fields["totalSteps"] = (raw or {}).get("totalSteps")
         fields["totalDistanceMeters"] = (raw or {}).get("totalDistanceMeters")
         return {"summary": fields, "raw": raw or {}}
+
+    async def async_get_day_timeline(self, day: date) -> dict[str, Any]:
+        """Return intraday stress, Body Battery and heart rate for any date."""
+        stress_raw = await self.client._request(  # noqa: SLF001
+            "GET", f"{STRESS_TIMELINE_URL}/{day.isoformat()}"
+        )
+        profile = await self.client.get_user_profile()
+        heart_rate_raw = await self.client._request(  # noqa: SLF001
+            "GET",
+            f"{HEART_RATE_TIMELINE_URL}/{quote(profile.display_name, safe='')}",
+            params={"date": day.isoformat()},
+        )
+        return build_timeline(stress_raw, heart_rate_raw)
+
+
+STRESS_TIMELINE_URL = f"{GARMIN_CONNECT_API}/wellness-service/wellness/dailyStress"
+HEART_RATE_TIMELINE_URL = f"{GARMIN_CONNECT_API}/wellness-service/wellness/dailyHeartRate"
+
+
+def _local_time(timestamp_ms: Any) -> datetime | None:
+    """Convert a Garmin epoch-milliseconds timestamp to local time."""
+    if not isinstance(timestamp_ms, (int, float)) or isinstance(timestamp_ms, bool):
+        return None
+    return dt_util.as_local(datetime.fromtimestamp(timestamp_ms / 1000, tz=UTC))
+
+
+def _points(rows: Any, value_index: int) -> list[tuple[datetime, Any]]:
+    """Return (local time, value) pairs from a Garmin [timestamp, ...] array."""
+    points: list[tuple[datetime, Any]] = []
+    for row in rows or []:
+        if not isinstance(row, (list, tuple)) or len(row) <= value_index:
+            continue
+        when = _local_time(row[0])
+        value = row[value_index]
+        if when is None or not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        points.append((when, value))
+    return points
+
+
+def build_timeline(stress_raw: Any, heart_rate_raw: Any) -> dict[str, Any]:
+    """Map Garmin's intraday stress, Body Battery and heart rate arrays.
+
+    Stress values below zero are Garmin's markers (-1 not measured or off
+    wrist, -2 activity) and are kept in the timeline but left out of the
+    hourly averages. Body Battery rows are [timestamp, status, level, version].
+    """
+    stress_raw = stress_raw if isinstance(stress_raw, dict) else {}
+    heart_rate_raw = heart_rate_raw if isinstance(heart_rate_raw, dict) else {}
+    stress = _points(stress_raw.get("stressValuesArray"), 1)
+    body_battery = _points(stress_raw.get("bodyBatteryValuesArray"), 2)
+    heart_rate = [
+        (when, bpm) for when, bpm in _points(heart_rate_raw.get("heartRateValues"), 1) if bpm > 0
+    ]
+
+    hours: dict[str, dict[str, Any]] = {}
+
+    def bucket(when: datetime) -> dict[str, Any]:
+        key = when.strftime("%H:00")
+        return hours.setdefault(
+            key,
+            {
+                "hour": key,
+                "stress": [],
+                "activity_samples": 0,
+                "heart_rate": [],
+                "body_battery": None,
+            },
+        )
+
+    for when, value in stress:
+        slot = bucket(when)
+        if value >= 0:
+            slot["stress"].append(value)
+        elif value == -2:
+            slot["activity_samples"] += 1
+    for when, bpm in heart_rate:
+        bucket(when)["heart_rate"].append(bpm)
+    for when, level in body_battery:
+        bucket(when)["body_battery"] = level
+
+    hourly = []
+    for key in sorted(hours):
+        slot = hours[key]
+        hourly.append(
+            {
+                "hour": key,
+                "avg_stress": round(sum(slot["stress"]) / len(slot["stress"]))
+                if slot["stress"]
+                else None,
+                "max_stress": max(slot["stress"]) if slot["stress"] else None,
+                "activity_samples": slot["activity_samples"],
+                "avg_heart_rate": round(sum(slot["heart_rate"]) / len(slot["heart_rate"]))
+                if slot["heart_rate"]
+                else None,
+                "min_heart_rate": min(slot["heart_rate"]) if slot["heart_rate"] else None,
+                "body_battery_end": slot["body_battery"],
+            }
+        )
+
+    return {
+        "hourly": hourly,
+        "stress": [{"time": when.isoformat(), "value": value} for when, value in stress],
+        "body_battery": [
+            {"time": when.isoformat(), "level": level} for when, level in body_battery
+        ],
+        "heart_rate": [{"time": when.isoformat(), "bpm": bpm} for when, bpm in heart_rate],
+    }
 
 
 class ActivityCoordinator(BaseGarminCoordinator):

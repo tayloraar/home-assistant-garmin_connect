@@ -580,3 +580,20 @@ get_day_summary:
         entity:
           integration: garmin_connect
           domain: sensor
+get_day_timeline:
+  name: Get day timeline
+  description: Fetch the intraday stress, Body Battery and heart rate for any date from Garmin Connect and return it, with an hourly summary.
+  fields:
+    date:
+      name: Date
+      description: The day to fetch.
+      required: true
+      selector:
+        date:
+    entity_id:
+      name: Entity
+      description: Optional Garmin Connect entity whose account to read.
+      selector:
+        entity:
+          integration: garmin_connect
+          domain: sensor

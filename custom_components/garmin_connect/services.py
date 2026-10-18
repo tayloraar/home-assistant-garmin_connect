@@ -50,6 +50,7 @@ SERVICE_DELETE_WORKOUT = "delete_workout"
 SERVICE_SCHEDULE_WORKOUT = "schedule_workout"
 SERVICE_UNSCHEDULE_WORKOUT = "unschedule_workout"
 SERVICE_GET_DAY_SUMMARY = "get_day_summary"
+SERVICE_GET_DAY_TIMELINE = "get_day_timeline"
 
 # Errors the library raises for bad input (unparsable timestamp, value out of
 # its own limits, unsupported file) on top of its API/network errors.
@@ -766,6 +767,20 @@ def async_setup_services(hass: HomeAssistant) -> None:
             ) from err
         return {"date": day.isoformat(), **result}
 
+    async def handle_get_day_timeline(call: ServiceCall) -> ServiceResponse:
+        """Return intraday stress, Body Battery and heart rate for any date."""
+        coordinators = _get_coordinators(hass, entity_id=call.data.get("entity_id"))
+        day: date = call.data["date"]
+        try:
+            result = await coordinators.core.async_get_day_timeline(day)
+        except _SERVICE_ERRORS as err:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="get_day_timeline_failed",
+                translation_placeholders={"error": str(err)},
+            ) from err
+        return {"date": day.isoformat(), **result}
+
     hass.services.async_register(
         DOMAIN,
         SERVICE_SET_ACTIVE_GEAR,
@@ -857,6 +872,13 @@ def async_setup_services(hass: HomeAssistant) -> None:
         DOMAIN,
         SERVICE_GET_DAY_SUMMARY,
         handle_get_day_summary,
+        schema=GET_DAY_SUMMARY_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_GET_DAY_TIMELINE,
+        handle_get_day_timeline,
         schema=GET_DAY_SUMMARY_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )

@@ -285,6 +285,14 @@
         "entity_id": { "name": "Entity", "description": "Optional Garmin Connect entity whose account to read." }
       }
     },
+    "get_day_timeline": {
+      "name": "Get day timeline",
+      "description": "Fetch the intraday stress, Body Battery and heart rate for any date from Garmin Connect and return it, with an hourly summary.",
+      "fields": {
+        "date": { "name": "Date", "description": "The day to fetch." },
+        "entity_id": { "name": "Entity", "description": "Optional Garmin Connect entity whose account to read." }
+      }
+    },
     "set_active_gear": {
       "name": "Set active gear",
       "description": "Set gear as active/default for an activity type.",
@@ -431,6 +439,7 @@
   },
   "exceptions": {
     "get_day_summary_failed": { "message": "Failed to fetch the day summary: {error}" },
+    "get_day_timeline_failed": { "message": "Failed to fetch the day timeline: {error}" },
     "add_blood_pressure_failed": { "message": "Failed to add blood pressure: {error}" },
     "add_hydration_failed": { "message": "Failed to log hydration: {error}" },
     "add_nutrition_failed": { "message": "Failed to log nutrition: {error}" },
