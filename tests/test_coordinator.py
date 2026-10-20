@@ -19,7 +19,13 @@ from custom_components.garmin_connect.coordinator import (
     CoreCoordinator,
     GearCoordinator,
     NutritionCoordinator,
+    _chunks,
     build_timeline,
+    parse_body_battery_range,
+    parse_hrv_range,
+    parse_rhr_range,
+    parse_steps_range,
+    parse_stress_range,
 )
 
 from .conftest import ENTRY_DATA
@@ -493,3 +499,86 @@ async def test_get_day_timeline_requests_both_endpoints() -> None:
     assert hr_call.args[1].endswith("/wellness-service/wellness/dailyHeartRate/a%20b%2Fc")
     assert hr_call.kwargs["params"] == {"date": "2026-10-18"}
     assert out["stress"][0]["value"] == 30
+
+
+def test_chunks_cover_range_in_28_day_windows() -> None:
+    windows = _chunks(date(2026, 1, 1), date(2026, 3, 1))
+    assert windows[0] == (date(2026, 1, 1), date(2026, 1, 28))
+    assert windows[-1][1] == date(2026, 3, 1)
+    assert sum((b - a).days + 1 for a, b in windows) == 60
+
+
+def test_history_parsers() -> None:
+    assert parse_steps_range([{"calendarDate": "2026-10-01", "totalSteps": 5000}]) == {
+        "2026-10-01": {"steps": 5000}
+    }
+    stress = parse_stress_range(
+        [
+            {
+                "calendarDate": "2026-10-01",
+                "values": {"overallStressLevel": 41, "highStressDuration": 600},
+            }
+        ]
+    )
+    assert stress["2026-10-01"]["stress_avg"] == 41
+    assert stress["2026-10-01"]["stress_high_min"] == 10
+    assert (
+        parse_stress_range([{"calendarDate": "d", "values": {"overallStressLevel": -1}}])["d"][
+            "stress_avg"
+        ]
+        is None
+    )
+    rhr = {
+        "allMetrics": {
+            "metricsMap": {"WELLNESS_RESTING_HEART_RATE": [{"calendarDate": "d", "value": 52.0}]}
+        }
+    }
+    assert parse_rhr_range(rhr) == {"d": {"rhr": 52.0}}
+    hrv = parse_hrv_range(
+        {
+            "hrvSummaries": [
+                {"calendarDate": "d", "lastNightAvg": 51, "weeklyAvg": 47, "status": "LOW"}
+            ]
+        }
+    )
+    assert hrv["d"] == {"hrv_night": 51, "hrv_week": 47, "hrv_status": "LOW"}
+    bb = parse_body_battery_range(
+        [
+            {
+                "date": "d",
+                "charged": 60,
+                "drained": 70,
+                "bodyBatteryValuesArray": [[1, 90], [2, 5], [3, None]],
+            }
+        ]
+    )
+    assert bb["d"] == {"bb_charged": 60, "bb_drained": 70, "bb_high": 90, "bb_low": 5}
+    assert parse_rhr_range(None) == {} and parse_hrv_range([]) == {} and parse_steps_range({}) == {}
+
+
+async def test_get_history_merges_metrics_and_reports_errors() -> None:
+    client = _yesterday_client(date(2026, 10, 18))
+    profile = MagicMock()
+    profile.display_name = "me"
+    client.get_user_profile = AsyncMock(return_value=profile)
+
+    async def fake_request(method, url, params=None):
+        if "steps" in url:
+            return [{"calendarDate": "2026-10-01", "totalSteps": 100}]
+        if "userstats" in url:
+            return {
+                "allMetrics": {
+                    "metricsMap": {
+                        "WELLNESS_RESTING_HEART_RATE": [{"calendarDate": "2026-10-01", "value": 50}]
+                    }
+                }
+            }
+        raise GarminConnectError("nope")
+
+    client._request = AsyncMock(side_effect=fake_request)
+    coordinator = _make_base(client)
+    with patch("custom_components.garmin_connect.coordinator.asyncio.sleep", AsyncMock()):
+        out = await coordinator.async_get_history(date(2026, 10, 1), date(2026, 10, 2), debug=True)
+    assert out["days"] == [{"date": "2026-10-01", "steps": 100, "rhr": 50}]
+    assert set(out["errors"]) == {"stress", "hrv", "body_battery"}
+    assert "steps" in out["samples"]

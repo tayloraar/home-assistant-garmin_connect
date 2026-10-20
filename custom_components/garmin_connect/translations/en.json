@@ -285,6 +285,16 @@
         "entity_id": { "name": "Entity", "description": "Optional Garmin Connect entity whose account to read." }
       }
     },
+    "get_history": {
+      "name": "Get history",
+      "description": "Fetch daily steps, stress, resting heart rate, HRV and Body Battery for a date range (up to 400 days) from Garmin Connect and return compact rows.",
+      "fields": {
+        "start": { "name": "Start", "description": "First day." },
+        "end": { "name": "End", "description": "Last day." },
+        "debug": { "name": "Debug", "description": "Also return a sample of each raw Garmin response." },
+        "entity_id": { "name": "Entity", "description": "Optional Garmin Connect entity whose account to read." }
+      }
+    },
     "get_day_timeline": {
       "name": "Get day timeline",
       "description": "Fetch the intraday stress, Body Battery and heart rate for any date from Garmin Connect and return it, with an hourly summary.",
@@ -440,6 +450,7 @@
   "exceptions": {
     "get_day_summary_failed": { "message": "Failed to fetch the day summary: {error}" },
     "get_day_timeline_failed": { "message": "Failed to fetch the day timeline: {error}" },
+    "get_history_failed": { "message": "Failed to fetch the history: {error}" },
     "add_blood_pressure_failed": { "message": "Failed to add blood pressure: {error}" },
     "add_hydration_failed": { "message": "Failed to log hydration: {error}" },
     "add_nutrition_failed": { "message": "Failed to log nutrition: {error}" },

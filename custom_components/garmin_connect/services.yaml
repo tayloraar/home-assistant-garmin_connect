@@ -597,3 +597,31 @@ get_day_timeline:
         entity:
           integration: garmin_connect
           domain: sensor
+get_history:
+  name: Get history
+  description: Fetch daily steps, stress, resting heart rate, HRV and Body Battery for a date range (up to 400 days) from Garmin Connect and return compact rows.
+  fields:
+    start:
+      name: Start
+      description: First day.
+      required: true
+      selector:
+        date:
+    end:
+      name: End
+      description: Last day.
+      required: true
+      selector:
+        date:
+    debug:
+      name: Debug
+      description: Also return a sample of each raw Garmin response.
+      selector:
+        boolean:
+    entity_id:
+      name: Entity
+      description: Optional Garmin Connect entity whose account to read.
+      selector:
+        entity:
+          integration: garmin_connect
+          domain: sensor

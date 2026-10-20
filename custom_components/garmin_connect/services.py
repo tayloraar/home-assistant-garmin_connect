@@ -51,6 +51,7 @@ SERVICE_SCHEDULE_WORKOUT = "schedule_workout"
 SERVICE_UNSCHEDULE_WORKOUT = "unschedule_workout"
 SERVICE_GET_DAY_SUMMARY = "get_day_summary"
 SERVICE_GET_DAY_TIMELINE = "get_day_timeline"
+SERVICE_GET_HISTORY = "get_history"
 
 # Errors the library raises for bad input (unparsable timestamp, value out of
 # its own limits, unsupported file) on top of its API/network errors.
@@ -281,6 +282,16 @@ GET_DAY_SUMMARY_SCHEMA = vol.Schema(
     {
         vol.Optional("entity_id"): cv.entity_id,
         vol.Required("date"): cv.date,
+    }
+)
+
+
+GET_HISTORY_SCHEMA = vol.Schema(
+    {
+        vol.Optional("entity_id"): cv.entity_id,
+        vol.Required("start"): cv.date,
+        vol.Required("end"): cv.date,
+        vol.Optional("debug", default=False): cv.boolean,
     }
 )
 
@@ -767,6 +778,27 @@ def async_setup_services(hass: HomeAssistant) -> None:
             ) from err
         return {"date": day.isoformat(), **result}
 
+    async def handle_get_history(call: ServiceCall) -> ServiceResponse:
+        """Return compact daily history rows for a date range."""
+        coordinators = _get_coordinators(hass, entity_id=call.data.get("entity_id"))
+        start: date = call.data["start"]
+        end: date = call.data["end"]
+        if end < start or (end - start).days > 400:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="get_history_failed",
+                translation_placeholders={"error": "end must be after start, at most 400 days"},
+            )
+        try:
+            result = await coordinators.core.async_get_history(start, end, call.data["debug"])
+        except _SERVICE_ERRORS as err:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="get_history_failed",
+                translation_placeholders={"error": str(err)},
+            ) from err
+        return {"start": start.isoformat(), "end": end.isoformat(), **result}
+
     async def handle_get_day_timeline(call: ServiceCall) -> ServiceResponse:
         """Return intraday stress, Body Battery and heart rate for any date."""
         coordinators = _get_coordinators(hass, entity_id=call.data.get("entity_id"))
@@ -880,5 +912,12 @@ def async_setup_services(hass: HomeAssistant) -> None:
         SERVICE_GET_DAY_TIMELINE,
         handle_get_day_timeline,
         schema=GET_DAY_SUMMARY_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_GET_HISTORY,
+        handle_get_history,
+        schema=GET_HISTORY_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )

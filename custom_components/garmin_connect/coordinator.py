@@ -285,6 +285,53 @@ class CoreCoordinator(BaseGarminCoordinator):
         )
         return build_timeline(stress_raw, heart_rate_raw)
 
+    async def async_get_history(
+        self, start: date, end: date, debug: bool = False
+    ) -> dict[str, Any]:
+        """Return compact daily rows (steps, stress, resting HR, HRV, Body Battery) for a range.
+
+        Each metric is fetched in 28-day windows; a metric that fails is reported
+        under ``errors`` and the others are still returned.
+        """
+        profile = await self.client.get_user_profile()
+        name = quote(profile.display_name, safe="")
+        metrics: dict[str, tuple[Any, Any]] = {
+            "steps": (lambda a, b: (f"{STEPS_RANGE_URL}/{a}/{b}", None), parse_steps_range),
+            "stress": (lambda a, b: (f"{STRESS_RANGE_URL}/{a}/{b}", None), parse_stress_range),
+            "rhr": (
+                lambda a, b: (
+                    f"{RHR_RANGE_URL}/{name}",
+                    {"fromDate": a, "untilDate": b, "metricId": 60},
+                ),
+                parse_rhr_range,
+            ),
+            "hrv": (lambda a, b: (f"{HRV_RANGE_URL}/{a}/{b}", None), parse_hrv_range),
+            "body_battery": (
+                lambda a, b: (BODY_BATTERY_RANGE_URL, {"startDate": a, "endDate": b}),
+                parse_body_battery_range,
+            ),
+        }
+        days: dict[str, dict[str, Any]] = {}
+        errors: dict[str, str] = {}
+        samples: dict[str, Any] = {}
+        for metric, (build, parse) in metrics.items():
+            for first, last in _chunks(start, end):
+                url, params = build(first.isoformat(), last.isoformat())
+                try:
+                    raw = await self.client._request("GET", url, params=params)  # noqa: SLF001
+                except (GarminConnectError, ClientError) as err:
+                    errors[metric] = str(err)
+                    break
+                if debug and metric not in samples:
+                    samples[metric] = raw[:2] if isinstance(raw, list) else raw
+                for day, row in parse(raw).items():
+                    days.setdefault(day, {"date": day}).update(row)
+                await asyncio.sleep(0.3)
+        out: dict[str, Any] = {"days": [days[d] for d in sorted(days)], "errors": errors}
+        if debug:
+            out["samples"] = samples
+        return out
+
 
 STRESS_TIMELINE_URL = f"{GARMIN_CONNECT_API}/wellness-service/wellness/dailyStress"
 HEART_RATE_TIMELINE_URL = f"{GARMIN_CONNECT_API}/wellness-service/wellness/dailyHeartRate"
@@ -379,6 +426,109 @@ def build_timeline(stress_raw: Any, heart_rate_raw: Any) -> dict[str, Any]:
         ],
         "heart_rate": [{"time": when.isoformat(), "bpm": bpm} for when, bpm in heart_rate],
     }
+
+
+HISTORY_CHUNK_DAYS = 28
+STEPS_RANGE_URL = f"{GARMIN_CONNECT_API}/usersummary-service/stats/steps/daily"
+STRESS_RANGE_URL = f"{GARMIN_CONNECT_API}/usersummary-service/stats/stress/daily"
+RHR_RANGE_URL = f"{GARMIN_CONNECT_API}/userstats-service/wellness/daily"
+HRV_RANGE_URL = f"{GARMIN_CONNECT_API}/hrv-service/hrv/daily"
+BODY_BATTERY_RANGE_URL = f"{GARMIN_CONNECT_API}/wellness-service/wellness/bodyBattery/reports/daily"
+
+
+def _chunks(start: date, end: date, size: int = HISTORY_CHUNK_DAYS) -> list[tuple[date, date]]:
+    """Split [start, end] into inclusive windows of at most ``size`` days."""
+    out: list[tuple[date, date]] = []
+    cur = start
+    while cur <= end:
+        stop = min(end, cur + timedelta(days=size - 1))
+        out.append((cur, stop))
+        cur = stop + timedelta(days=1)
+    return out
+
+
+def _number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value
+
+
+def parse_steps_range(raw: Any) -> dict[str, dict[str, Any]]:
+    """[{calendarDate, totalSteps}] -> {date: {steps}}."""
+    rows: dict[str, dict[str, Any]] = {}
+    for item in raw if isinstance(raw, list) else []:
+        if isinstance(item, dict) and item.get("calendarDate"):
+            rows[item["calendarDate"]] = {"steps": _number(item.get("totalSteps"))}
+    return rows
+
+
+def parse_stress_range(raw: Any) -> dict[str, dict[str, Any]]:
+    """[{calendarDate, values: {overallStressLevel, ...}}] -> {date: {stress_avg, ...}}."""
+    rows: dict[str, dict[str, Any]] = {}
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict) or not item.get("calendarDate"):
+            continue
+        values = item.get("values") if isinstance(item.get("values"), dict) else item
+        avg = _number(values.get("overallStressLevel"))
+        if avg is None:
+            avg = _number(values.get("averageStressLevel"))
+        row: dict[str, Any] = {"stress_avg": avg if avg is None or avg >= 0 else None}
+        for key, name in (
+            ("highStressDuration", "stress_high_min"),
+            ("restStressDuration", "stress_rest_min"),
+        ):
+            seconds = _number(values.get(key))
+            row[name] = round(seconds / 60) if seconds is not None else None
+        rows[item["calendarDate"]] = row
+    return rows
+
+
+def parse_rhr_range(raw: Any) -> dict[str, dict[str, Any]]:
+    """userstats allMetrics.metricsMap.WELLNESS_RESTING_HEART_RATE -> {date: {rhr}}."""
+    rows: dict[str, dict[str, Any]] = {}
+    metrics = (
+        (((raw or {}).get("allMetrics") or {}).get("metricsMap") or {})
+        if isinstance(raw, dict)
+        else {}
+    )
+    for item in metrics.get("WELLNESS_RESTING_HEART_RATE") or []:
+        if isinstance(item, dict) and item.get("calendarDate"):
+            rows[item["calendarDate"]] = {"rhr": _number(item.get("value"))}
+    return rows
+
+
+def parse_hrv_range(raw: Any) -> dict[str, dict[str, Any]]:
+    """{hrvSummaries: [{calendarDate, lastNightAvg, weeklyAvg, status}]} -> {date: {...}}."""
+    rows: dict[str, dict[str, Any]] = {}
+    items = raw.get("hrvSummaries") if isinstance(raw, dict) else raw
+    for item in items if isinstance(items, list) else []:
+        if isinstance(item, dict) and item.get("calendarDate"):
+            rows[item["calendarDate"]] = {
+                "hrv_night": _number(item.get("lastNightAvg")),
+                "hrv_week": _number(item.get("weeklyAvg")),
+                "hrv_status": item.get("status"),
+            }
+    return rows
+
+
+def parse_body_battery_range(raw: Any) -> dict[str, dict[str, Any]]:
+    """[{date, charged, drained, bodyBatteryValuesArray}] -> {date: {...}}."""
+    rows: dict[str, dict[str, Any]] = {}
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict) or not item.get("date"):
+            continue
+        levels = [
+            _number(v[1])
+            for v in item.get("bodyBatteryValuesArray") or []
+            if isinstance(v, (list, tuple)) and len(v) > 1 and _number(v[1]) is not None
+        ]
+        rows[item["date"]] = {
+            "bb_charged": _number(item.get("charged")),
+            "bb_drained": _number(item.get("drained")),
+            "bb_high": max(levels) if levels else None,
+            "bb_low": min(levels) if levels else None,
+        }
+    return rows
 
 
 class ActivityCoordinator(BaseGarminCoordinator):
